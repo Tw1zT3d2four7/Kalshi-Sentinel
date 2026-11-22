@@ -300,3 +300,24 @@ MIT License
 **Built with ❤️ for Kalshi prediction markets**
 
 
+
+
+## 🐳 Docker
+
+A Docker Compose deployment with persistent MongoDB storage is available.
+See [Docker deployment](docs/DOCKER.md) for configuration, startup, upgrades,
+and GHCR image details.
+
+Quick start:
+
+```bash
+cp .env.example .env
+# Set CLIENT_TOKEN, APPLICATION_ID, and ENCRYPTION_KEY in .env
+docker compose build
+docker compose up -d
+docker compose logs -f kalshi-sentinel
+```
+
+The default Kalshi endpoint is the demo environment. Live trading can execute
+real orders, including automated stop-loss orders; review and test carefully
+before changing the endpoint to a live API.
