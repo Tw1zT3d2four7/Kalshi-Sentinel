@@ -75,7 +75,7 @@ This bot brings Kalshi prediction markets directly into your Discord server. Use
 | Command | Description |
 |---------|-------------|
 | `/alert` | Set price alerts (notifies when threshold hit) |
-| `/stoploss` | Auto-exit positions (executes SELL order when price drops) |
+| `/stoploss` | Monitor a position and attempt an IOC limit sell after a price drop (partial/no fills are possible) |
 
 ---
 
@@ -89,7 +89,7 @@ This bot brings Kalshi prediction markets directly into your Discord server. Use
 
 ### 🔔 **Smart Alerts & Automation**
 - **Price Alerts**: Get notified when price increases by X%
-- **Stop Loss Orders**: Auto-execute SELL orders when price drops by X%
+- **Stop Loss Monitors**: Attempt an immediate-or-cancel limit sell at the available bid after the user-supplied entry-price threshold is reached. A trigger does not guarantee a fill; verify the resulting position in Kalshi.
 - **WebSocket Real-Time Monitoring**: Live price updates via Kalshi WebSocket API
 - **Auto-DM Notifications**: Receive alerts directly in Discord DMs
 

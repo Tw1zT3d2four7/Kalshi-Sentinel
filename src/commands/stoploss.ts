@@ -1,256 +1,77 @@
 /**
  * /stoploss command
- * Set up automatic stop loss orders
+ * Monitor a user-supplied entry price and attempt an IOC limit exit at the bid.
  */
-
-import {
-  SlashCommandBuilder,
-  ChatInputCommandInteraction,
-  EmbedBuilder,
-} from 'discord.js';
-import * as dotenv from 'dotenv';
+import { SlashCommandBuilder, ChatInputCommandInteraction, EmbedBuilder } from 'discord.js';
 import { kalshiUserManager } from '../kalshi-user-manager.js';
 import { stopLossManager } from '../stoploss-manager.js';
 
-dotenv.config();
-
 export const stoplossCommand = new SlashCommandBuilder()
   .setName('stoploss')
-  .setDescription('Set up automatic stop loss orders')
-  .addSubcommand(subcommand =>
-    subcommand
-      .setName('set')
-      .setDescription('Create a stop loss order')
-      .addStringOption(option =>
-        option
-          .setName('ticker')
-          .setDescription('Market ticker (e.g., KXKHAMENEIOUT-AKHA-26SEP01)')
-          .setRequired(true)
-      )
-      .addStringOption(option =>
-        option
-          .setName('side')
-          .setDescription('Which side you hold: YES or NO')
-          .addChoices(
-            { name: 'YES', value: 'yes' },
-            { name: 'NO', value: 'no' }
-          )
-          .setRequired(true)
-      )
-      .addNumberOption(option =>
-        option
-          .setName('drop_percentage')
-          .setDescription('Exit if price drops by X% (e.g., 10 for -10%)')
-          .setMinValue(0.1)
-          .setMaxValue(100)
-          .setRequired(true)
-      )
-  )
-  .addSubcommand(subcommand =>
-    subcommand
-      .setName('list')
-      .setDescription('View all your active stop losses')
-  )
-  .addSubcommand(subcommand =>
-    subcommand
-      .setName('stop')
-      .setDescription('Cancel a stop loss order')
-      .addStringOption(option =>
-        option
-          .setName('ticker')
-          .setDescription('Market ticker to cancel')
-          .setRequired(true)
-      )
-      .addStringOption(option =>
-        option
-          .setName('side')
-          .setDescription('Which side (YES or NO)')
-          .addChoices(
-            { name: 'YES', value: 'yes' },
-            { name: 'NO', value: 'no' }
-          )
-          .setRequired(true)
-      )
-  );
+  .setDescription('Monitor a Kalshi position and attempt a limit exit')
+  .addSubcommand(sub => sub.setName('set').setDescription('Create a stop-loss monitor')
+    .addStringOption(o => o.setName('ticker').setDescription('Exact market ticker').setRequired(true))
+    .addStringOption(o => o.setName('side').setDescription('Position side').addChoices({name:'YES',value:'yes'},{name:'NO',value:'no'}).setRequired(true))
+    .addNumberOption(o => o.setName('entry_price').setDescription('Your entry price in dollars (for example 0.52)').setMinValue(0.01).setMaxValue(0.99).setRequired(true))
+    .addNumberOption(o => o.setName('drop_percentage').setDescription('Trigger after this percentage drop').setMinValue(0.1).setMaxValue(99).setRequired(true)))
+  .addSubcommand(sub => sub.setName('list').setDescription('List active stop-loss monitors'))
+  .addSubcommand(sub => sub.setName('stop').setDescription('Stop a monitor')
+    .addStringOption(o => o.setName('ticker').setDescription('Market ticker').setRequired(true))
+    .addStringOption(o => o.setName('side').setDescription('YES or NO').addChoices({name:'YES',value:'yes'},{name:'NO',value:'no'}).setRequired(true)));
 
 export async function executeStopLoss(interaction: ChatInputCommandInteraction) {
-  const subcommand = (interaction.options as any).getSubcommand();
-  const userId = interaction.user.id;
-
+  await interaction.deferReply({ ephemeral: true });
   try {
-    // Reply immediately to prevent Discord timeout (3 second window)
-    try {
-      if (!interaction.replied) {
-        await interaction.reply({
-          content: '⏳ Processing...',
-          ephemeral: true,
-        });
-      }
-    } catch (replyErr) {
-      console.error('Failed to reply to interaction:', replyErr);
-      return; // Exit if we can't reply
-    }
+    const subcommand = interaction.options.getSubcommand();
+    const userId = interaction.user.id;
 
     if (subcommand === 'set') {
-      await handleSetStopLoss(interaction, userId);
-    } else if (subcommand === 'list') {
-      await handleListStopLosses(interaction, userId);
-    } else if (subcommand === 'stop') {
-      await handleStopStopLoss(interaction, userId);
+      const ticker = interaction.options.getString('ticker', true).trim().toUpperCase();
+      const side = interaction.options.getString('side', true) as 'yes' | 'no';
+      const basePrice = interaction.options.getNumber('entry_price', true);
+      const dropPercentage = interaction.options.getNumber('drop_percentage', true);
+      const account = await kalshiUserManager.getKalshiUser(userId);
+      if (!account?.kalshi_api_key || !account?.kalshi_private_key) {
+        await interaction.editReply({ content: '❌ Link your Kalshi account with /link before setting a stop loss.' });
+        return;
+      }
+
+      await stopLossManager.startStopLoss({
+        userId, marketTicker: ticker, side, basePrice, dropPercentage,
+        apiKey: account.kalshi_api_key,
+        privateKey: account.kalshi_private_key,
+      });
+      delete (account as any).kalshi_api_key;
+      delete (account as any).kalshi_private_key;
+
+      const trigger = basePrice * (1 - dropPercentage / 100);
+      const embed = new EmbedBuilder().setColor(0xe6a23c)
+        .setTitle('🛑 Stop-Loss Monitor Connected')
+        .setDescription(`Monitoring **${ticker}** • ${side.toUpperCase()}`)
+        .addFields(
+          { name: 'Entry price (user supplied)', value: `$${basePrice.toFixed(4)}`, inline: true },
+          { name: 'Drop threshold', value: `-${dropPercentage}%`, inline: true },
+          { name: 'Trigger price', value: `$${trigger.toFixed(4)}`, inline: true },
+        )
+        .setFooter({ text: 'At trigger, the bot checks your matching position and submits an IOC limit sell at the current bid. Partial/no fills are possible.' });
+      await interaction.editReply({ embeds: [embed] });
+      return;
+    }
+
+    if (subcommand === 'list') {
+      const ids = stopLossManager.getActiveStopLosses(userId);
+      await interaction.editReply({ content: ids.length ? `Active stop-loss monitors:\n${ids.map(id => `• ${id.slice(userId.length + 1)}`).join('\n')}` : 'No active stop-loss monitors.' });
+      return;
+    }
+
+    if (subcommand === 'stop') {
+      const ticker = interaction.options.getString('ticker', true).trim().toUpperCase();
+      const side = interaction.options.getString('side', true);
+      const stopped = stopLossManager.stopStopLoss(userId, ticker, side);
+      await interaction.editReply({ content: stopped ? `🛑 Stopped monitor for ${ticker} (${side.toUpperCase()}).` : `No active monitor found for ${ticker} (${side.toUpperCase()}).` });
     }
   } catch (error) {
-    console.error('Error in stoploss command:', error);
-    // Only try to edit if we have a valid interaction
-    if (interaction.replied) {
-      try {
-        await interaction.editReply({
-          content: `❌ **Error!** ${error instanceof Error ? error.message : 'Unknown error'}`,
-        });
-      } catch (e) {
-        console.error('Failed to edit reply:', e);
-      }
-    }
+    console.error('Error in /stoploss command:', error);
+    await interaction.editReply({ content: `❌ Could not start or manage the stop-loss monitor: ${error instanceof Error ? error.message : 'Unknown error'}` });
   }
-}
-
-async function handleSetStopLoss(
-  interaction: ChatInputCommandInteraction,
-  userId: string
-) {
-  const ticker = ((interaction.options as any).getString('ticker') || '').toUpperCase();
-  const side = ((interaction.options as any).getString('side') || 'yes') as 'yes' | 'no';
-  const dropPercentage = (interaction.options as any).getNumber('drop_percentage') || 10;
-
-  // Get user's Kalshi account
-  const kalshiUser = await kalshiUserManager.getKalshiUser(userId);
-
-  if (!kalshiUser || !kalshiUser.kalshi_api_key || !kalshiUser.kalshi_private_key) {
-    return await interaction.editReply({
-      content: '❌ **No Kalshi Account Linked**\n\nUse `/link` to connect your Kalshi account first!',
-    });
-  }
-
-  // Get base price from current position (we'll use a default for now)
-  // In production, fetch actual position price
-  const basePrice = 0.50;
-
-  // Start the stop loss
-  stopLossManager.startStopLoss({
-    userId,
-    marketTicker: ticker,
-    side,
-    basePrice,
-    dropPercentage,
-    apiKey: kalshiUser.kalshi_api_key,
-    privateKey: kalshiUser.kalshi_private_key,
-  });
-
-  const triggerPrice = (basePrice * (1 - dropPercentage / 100)).toFixed(4);
-
-  const embed = new EmbedBuilder()
-    .setColor(0xff6b6b)
-    .setTitle('🛑 Stop Loss Set!')
-    .setDescription(`Auto-exit order ready for **${ticker}**`)
-    .addFields(
-      {
-        name: '📊 Market Ticker',
-        value: `\`${ticker}\``,
-        inline: true,
-      },
-      {
-        name: '📈 Side Held',
-        value: side.toUpperCase(),
-        inline: true,
-      },
-      {
-        name: '🔴 Drop Threshold',
-        value: `\`-${dropPercentage}%\``,
-        inline: true,
-      },
-      {
-        name: '💰 Entry Price',
-        value: `\`$${basePrice.toFixed(4)}\``,
-        inline: true,
-      },
-      {
-        name: '⚡ Trigger Price',
-        value: `\`$${triggerPrice}\``,
-        inline: true,
-      },
-      {
-        name: '🤖 Auto-Execution',
-        value: 'Market SELL order when triggered',
-        inline: true,
-      },
-      {
-        name: '📋 What happens',
-        value: `When ${side.toUpperCase()} price drops to $${triggerPrice}:\n✅ Bot automatically sells your position\n✅ You get a DM with order confirmation\n✅ Stop loss closes`,
-        inline: false,
-      }
-    )
-    .setFooter({
-      text: 'Use /stoploss list to see all active stop losses',
-    })
-    .setTimestamp();
-
-  await interaction.editReply({ embeds: [embed] });
-}
-
-async function handleListStopLosses(
-  interaction: ChatInputCommandInteraction,
-  userId: string
-) {
-  const activeStopLosses = stopLossManager.getActiveStopLosses(userId);
-
-  if (activeStopLosses.length === 0) {
-    return await interaction.editReply({
-      content: '🛑 **No active stop losses!** Use `/stoploss set` to create one.',
-    });
-  }
-
-  let description = '';
-  for (const stopLossId of activeStopLosses) {
-    const [, ticker, side] = stopLossId.split('-');
-    description += `\n🛑 \`${ticker}\` (${side.toUpperCase()})`;
-  }
-
-  const embed = new EmbedBuilder()
-    .setColor(0xff6b6b)
-    .setTitle('🛑 Active Stop Losses')
-    .setDescription(description.trim())
-    .addFields({
-      name: '📊 Total Active',
-      value: `\`${activeStopLosses.length}\``,
-      inline: false,
-    })
-    .setFooter({
-      text: 'Use /stoploss stop <ticker> <side> to cancel',
-    })
-    .setTimestamp();
-
-  await interaction.editReply({ embeds: [embed] });
-}
-
-async function handleStopStopLoss(
-  interaction: ChatInputCommandInteraction,
-  userId: string
-) {
-  const ticker = ((interaction.options as any).getString('ticker') || '').toUpperCase();
-  const side = ((interaction.options as any).getString('side') || 'yes') as 'yes' | 'no';
-
-  const stopped = stopLossManager.stopStopLoss(userId, ticker, side);
-
-  if (!stopped) {
-    return await interaction.editReply({
-      content: `❌ **Stop loss not found!** No active stop loss for \`${ticker}\` (${side.toUpperCase()})`,
-    });
-  }
-
-  const embed = new EmbedBuilder()
-    .setColor(0x888888)
-    .setTitle('🛑 Stop Loss Cancelled')
-    .setDescription(`Stopped monitoring **${ticker}** (${side.toUpperCase()})`)
-    .setTimestamp();
-
-  await interaction.editReply({ embeds: [embed] });
 }

@@ -1,14 +1,13 @@
 /**
- * Stop Loss Manager
- * Monitor positions and auto-execute sell orders when price drops
+ * Kalshi stop-loss monitor.
+ * Watches the authenticated ticker stream and submits an IOC limit sell at the
+ * currently available bid. IOC limits can partially fill or not fill at all.
  */
-
 import WebSocket from 'ws';
-import { Client as DiscordClient, EmbedBuilder } from 'discord.js';
-import * as dotenv from 'dotenv';
+import { Client, EmbedBuilder } from 'discord.js';
 import crypto from 'crypto';
+import * as dotenv from 'dotenv';
 import { makeSignedGetRequest, makeSignedPostRequest } from './kalshi-request-signer.js';
-
 dotenv.config();
 
 const KALSHI_BASE_URL = process.env.KALSHI_BASE_URL || 'https://demo-api.kalshi.co';
@@ -18,381 +17,220 @@ export interface StopLossOrder {
   marketTicker: string;
   side: 'yes' | 'no';
   basePrice: number;
-  dropPercentage: number; // e.g., 10 for -10%
+  dropPercentage: number;
   apiKey: string;
   privateKey: string;
 }
 
-interface MarketUpdate {
+interface TickerMessage {
   market_ticker: string;
-  yes_price?: number;
-  no_price?: number;
-  timestamp?: number;
+  price_dollars?: string;
+  yes_bid_dollars?: string;
+  yes_ask_dollars?: string;
 }
 
 export class StopLossManager {
-  private activeStopLosses: Map<string, WebSocket> = new Map();
-  private discordClient: DiscordClient | null = null;
+  private activeStopLosses = new Map<string, WebSocket>();
+  private discordClient: Client | null = null;
 
-  setDiscordClient(client: DiscordClient) {
-    this.discordClient = client;
-  }
+  setDiscordClient(client: Client) { this.discordClient = client; }
 
-  /**
-   * Start monitoring a position for stop loss
-   */
-  startStopLoss(stopLoss: StopLossOrder) {
-    const stopLossId = `${stopLoss.userId}-${stopLoss.marketTicker}-${stopLoss.side}`;
+  async startStopLoss(stopLoss: StopLossOrder): Promise<void> {
+    const id = `${stopLoss.userId}-${stopLoss.marketTicker}-${stopLoss.side}`;
+    this.activeStopLosses.get(id)?.close();
 
-    // Stop existing stop loss if running
-    if (this.activeStopLosses.has(stopLossId)) {
-      const existingWs = this.activeStopLosses.get(stopLossId);
-      if (existingWs) existingWs.close();
-    }
+    const wsUrl = KALSHI_BASE_URL.includes('demo')
+      ? 'wss://external-api-ws.demo.kalshi.co/trade-api/ws/v2'
+      : 'wss://external-api-ws.kalshi.com/trade-api/ws/v2';
 
-    const WS_URL = process.env.KALSHI_BASE_URL?.includes('demo')
-      ? 'wss://demo-api.kalshi.co/trade-api/ws/v2'
-      : 'wss://api.elections.kalshi.com/trade-api/ws/v2';
+    const timestamp = Date.now().toString();
+    const signer = crypto.createSign('RSA-SHA256');
+    signer.update(timestamp + 'GET/trade-api/ws/v2');
+    signer.end();
+    const signature = signer.sign({
+      key: stopLoss.privateKey,
+      padding: crypto.constants.RSA_PKCS1_PSS_PADDING,
+      saltLength: crypto.constants.RSA_PSS_SALTLEN_DIGEST,
+    }, 'base64');
 
-    console.log(`🛑 Starting stop loss for ${stopLossId}...`);
-
-    try {
-      // Generate authentication headers for WebSocket
-      const timestamp = Math.floor(Date.now() / 1000).toString();
-      const message = timestamp + 'GET/trade-api/ws/v2';
-      
-      const sign = crypto.createSign('RSA-SHA256');
-      sign.update(message);
-      const signature = sign.sign({
-        key: stopLoss.privateKey,
-        format: 'pem',
-        type: 'pkcs8',
-        padding: crypto.constants.RSA_PKCS1_PSS_PADDING,
-        saltLength: crypto.constants.RSA_PSS_SALTLEN_DIGEST,
-      }, 'base64');
-
-      const headers = {
+    const ws = new WebSocket(wsUrl, {
+      headers: {
         'KALSHI-ACCESS-KEY': stopLoss.apiKey,
         'KALSHI-ACCESS-SIGNATURE': signature,
         'KALSHI-ACCESS-TIMESTAMP': timestamp,
-      };
+      },
+    });
+    this.activeStopLosses.set(id, ws);
+    ws.on('error', error => console.error(`Kalshi stop-loss socket error for ${id}:`, error));
 
-      const ws = new WebSocket(WS_URL, {
-        headers,
+    let hasExecuted = false;
+    await new Promise<void>((resolve, reject) => {
+      let connected = false;
+      const timeout = setTimeout(() => {
+        if (!connected) {
+          ws.close();
+          this.activeStopLosses.delete(id);
+          reject(new Error('Kalshi WebSocket connection timed out.'));
+        }
+      }, 15000);
+
+      ws.once('open', () => {
+        connected = true;
+        clearTimeout(timeout);
+        console.log(`✅ Kalshi ticker stream connected for stop loss ${id}`);
+        ws.send(JSON.stringify({
+          id: 1,
+          cmd: 'subscribe',
+          params: { channels: ['ticker'], market_ticker: stopLoss.marketTicker },
+        }));
+        resolve();
       });
-      let hasExecuted = false;
 
-      ws.on('open', () => {
-        console.log(`✅ WS connected for stop loss ${stopLossId}`);
-
-        // Subscribe to market ticker
-        ws.send(
-          JSON.stringify({
-            id: 1,
-            cmd: 'subscribe',
-            params: {
-              channels: ['market_ticker'],
-              market_ticker: stopLoss.marketTicker,
-            },
-          })
-        );
-      });
-
-      ws.on('message', async (raw) => {
-        try {
-          const msg = JSON.parse(raw.toString());
-
-          if (msg.type !== 'market_ticker') return;
-
-          const data: MarketUpdate = msg.data;
-
-          if (data.market_ticker !== stopLoss.marketTicker) return;
-
-          const currentPrice =
-            stopLoss.side === 'yes' ? data.yes_price : data.no_price;
-
-          if (!currentPrice) return;
-
-          // Calculate trigger price (drop by X%)
-          const triggerPrice = stopLoss.basePrice * (1 - stopLoss.dropPercentage / 100);
-          const dropPercent = ((currentPrice - stopLoss.basePrice) / stopLoss.basePrice * 100).toFixed(2);
-
-          console.log(
-            `📊 ${stopLoss.marketTicker} [${stopLoss.side.toUpperCase()}] - Current: $${currentPrice.toFixed(4)}, Trigger: $${triggerPrice.toFixed(4)} (${dropPercent}%)`
-          );
-
-          // 🔴 Check if stop loss triggered
-          if (currentPrice <= triggerPrice && !hasExecuted) {
-            hasExecuted = true;
-            console.log(`🛑 STOP LOSS TRIGGERED for ${stopLossId}! Executing sell order...`);
-
-            await this.executeSellOrder(stopLoss, currentPrice, data);
-            ws.close();
-            this.activeStopLosses.delete(stopLossId);
-          }
-        } catch (err) {
-          console.error('Error processing WS message:', err);
+      ws.once('error', error => {
+        if (!connected) {
+          clearTimeout(timeout);
+          this.activeStopLosses.delete(id);
+          reject(error);
+        } else {
+          console.error(`Kalshi WebSocket error for stop loss ${id}:`, error);
         }
       });
 
-      ws.on('error', (err) => {
-        console.error(`❌ WS error for ${stopLossId}:`, err);
+      ws.on('message', async raw => {
+        try {
+          const message = JSON.parse(raw.toString());
+          if (message.type !== 'ticker' || !message.msg) return;
+          const data = message.msg as TickerMessage;
+          if (data.market_ticker !== stopLoss.marketTicker || !data.price_dollars) return;
+
+          const yesLast = Number(data.price_dollars);
+          if (!Number.isFinite(yesLast) || yesLast <= 0 || yesLast >= 1) return;
+          const currentPrice = stopLoss.side === 'yes' ? yesLast : 1 - yesLast;
+          const triggerPrice = stopLoss.basePrice * (1 - stopLoss.dropPercentage / 100);
+
+          if (currentPrice <= triggerPrice && !hasExecuted) {
+            hasExecuted = true;
+            console.warn(`🛑 Stop-loss threshold reached for ${id}; attempting IOC limit exit.`);
+            await this.executeSellOrder(stopLoss, currentPrice, data);
+            ws.close();
+            this.activeStopLosses.delete(id);
+          }
+        } catch (error) {
+          console.error(`Error processing stop-loss ticker for ${id}:`, error);
+        }
       });
 
       ws.on('close', () => {
-        console.log(`🔌 WS closed for ${stopLossId}`);
-        this.activeStopLosses.delete(stopLossId);
+        if (this.activeStopLosses.get(id) === ws) this.activeStopLosses.delete(id);
+        console.log(`Kalshi ticker stream closed for stop loss ${id}`);
       });
+    });
 
-      this.activeStopLosses.set(stopLossId, ws);
-    } catch (err) {
-      console.error('Error starting stop loss:', err);
-    }
   }
 
-  /**
-   * Execute sell order when stop loss triggers
-   */
-  private async executeSellOrder(
-    stopLoss: StopLossOrder,
-    currentPrice: number,
-    marketData: MarketUpdate
-  ) {
-    if (!this.discordClient) {
-      console.error('Discord client not initialized');
-      return;
-    }
-
+  private async executeSellOrder(stopLoss: StopLossOrder, currentPrice: number, market: TickerMessage) {
     try {
-      // Step 1: Get current position to know quantity to sell
-      console.log(`📍 Fetching position for ${stopLoss.marketTicker}...`);
-
-      const positionsData = await makeSignedGetRequest(
+      const positions = await makeSignedGetRequest(
         '/trade-api/v2/portfolio/positions?limit=100',
-        stopLoss.apiKey,
-        stopLoss.privateKey,
-        KALSHI_BASE_URL
+        stopLoss.apiKey, stopLoss.privateKey, KALSHI_BASE_URL,
       );
+      const position = (positions.market_positions || []).find((p: any) => p.ticker === stopLoss.marketTicker);
+      const signedQuantity = Number(position?.position_fp || 0);
+      const heldSide = signedQuantity > 0 ? 'yes' : signedQuantity < 0 ? 'no' : null;
 
-      // Find position for this market
-      let positionQuantity = 0;
-      if (positionsData.market_positions) {
-        const position = positionsData.market_positions.find(
-          (p: any) => p.ticker === stopLoss.marketTicker
-        );
-        if (position) {
-          positionQuantity = parseFloat(position.position_fp) || 0;
-        }
-      }
-
-      if (positionQuantity <= 0) {
-        console.log(`⚠️ No position found for ${stopLoss.marketTicker}`);
-        await this.sendStopLossDM(stopLoss, currentPrice, marketData, null, 'Position not found');
+      if (!position || heldSide !== stopLoss.side) {
+        await this.sendStopLossDM(stopLoss, currentPrice, null, 'No matching open position was found for the selected side. No order was sent.');
         return;
       }
 
-      // Step 2: Place SELL order (opposite side)
-      console.log(
-        `📤 Placing SELL order: ${positionQuantity} ${stopLoss.side.toUpperCase()} @ market price...`
-      );
+      const quantity = Math.abs(signedQuantity);
+      const yesBid = Number(market.yes_bid_dollars);
+      const yesAsk = Number(market.yes_ask_dollars);
+      const limitPrice = stopLoss.side === 'yes' ? yesBid : 1 - yesAsk;
+      if (!Number.isFinite(limitPrice) || limitPrice < 0.01 || limitPrice > 0.99) {
+        await this.sendStopLossDM(stopLoss, currentPrice, null, 'A valid current bid was unavailable. No order was sent.');
+        return;
+      }
 
-      const orderPayload = {
+      const body: Record<string, any> = {
         ticker: stopLoss.marketTicker,
-        side: stopLoss.side, // Sell the same side we're holding
-        type: 'market', // Market order for fast execution
-        quantity: positionQuantity,
+        side: stopLoss.side,
+        action: 'sell',
+        count_fp: quantity.toFixed(2),
+        time_in_force: 'immediate_or_cancel',
+        self_trade_prevention_type: 'taker_at_cross',
+        client_order_id: crypto.randomUUID(),
+        ...(stopLoss.side === 'yes'
+          ? { yes_price_dollars: limitPrice.toFixed(4) }
+          : { no_price_dollars: limitPrice.toFixed(4) }),
       };
 
-      const orderResult = await makeSignedPostRequest(
+      const response = await makeSignedPostRequest(
         '/trade-api/v2/portfolio/orders',
-        stopLoss.apiKey,
-        stopLoss.privateKey,
-        KALSHI_BASE_URL,
-        orderPayload
+        stopLoss.apiKey, stopLoss.privateKey, KALSHI_BASE_URL, body,
       );
+      const order = response?.order;
+      if (!order?.order_id) {
+        await this.sendStopLossDM(stopLoss, currentPrice, null, 'Kalshi did not return an order ID. Verify the account order history before taking further action.');
+        return;
+      }
 
-      console.log(`✅ Order executed! Order ID: ${orderResult.order?.order_id}`);
-
-      // Step 3: Send DM with confirmation
+      const filled = Number(order.fill_count_fp ?? order.fill_count ?? 0);
+      const remaining = Number(order.remaining_count_fp ?? order.remaining_count ?? Math.max(0, quantity - filled));
+      const summary = `IOC limit sell submitted at $${limitPrice.toFixed(4)}. Filled: ${filled.toFixed(2)} / ${quantity.toFixed(2)} contracts; remaining: ${remaining.toFixed(2)}. Order: ${order.order_id}. A partial or zero fill is possible.`;
+      await this.sendStopLossDM(stopLoss, currentPrice, order, summary);
+    } catch (error) {
+      console.error('Stop-loss exit attempt failed:', error);
       await this.sendStopLossDM(
-        stopLoss,
-        currentPrice,
-        marketData,
-        orderResult.order,
-        null
-      );
-    } catch (err) {
-      console.error('Error executing stop loss order:', err);
-      await this.sendStopLossDM(
-        stopLoss,
-        currentPrice,
-        marketData,
-        null,
-        err instanceof Error ? err.message : 'Unknown error'
+        stopLoss, currentPrice, null,
+        error instanceof Error ? error.message : 'Unknown Kalshi order error. Check the account order history.',
       );
     }
   }
 
-  /**
-   * Send stop loss DM to user
-   */
-  private async sendStopLossDM(
-    stopLoss: StopLossOrder,
-    currentPrice: number,
-    marketData: MarketUpdate,
-    order: any,
-    errorMessage: string | null
-  ) {
+  private async sendStopLossDM(stopLoss: StopLossOrder, currentPrice: number, order: any, result: string) {
     if (!this.discordClient) return;
-
     try {
       const user = await this.discordClient.users.fetch(stopLoss.userId);
-
-      const priceChange = (
-        ((currentPrice - stopLoss.basePrice) / stopLoss.basePrice) *
-        100
-      ).toFixed(2);
-
-      let title = '🛑 Stop Loss Triggered!';
-      let color = 0xff6b6b; // Red
-
-      if (errorMessage) {
-        title = '❌ Stop Loss Error';
-        color = 0xff4444;
-      } else if (order) {
-        title = '✅ Position Closed!';
-        color = 0x00ff00;
-      }
-
       const embed = new EmbedBuilder()
-        .setColor(color)
-        .setTitle(title)
-        .setDescription(`**${stopLoss.marketTicker}**\n${stopLoss.side.toUpperCase()} position exited`)
+        .setColor(order ? 0xe6a23c : 0xff6b6b)
+        .setTitle('🛑 Stop-Loss Triggered — Exit Attempt Report')
+        .setDescription(`**${stopLoss.marketTicker}** • ${stopLoss.side.toUpperCase()}`)
         .addFields(
-          {
-            name: '📊 Market Ticker',
-            value: `\`${stopLoss.marketTicker}\``,
-            inline: true,
-          },
-          {
-            name: '📈 Side Held',
-            value: stopLoss.side.toUpperCase(),
-            inline: true,
-          },
-          {
-            name: '🔴 Stop Loss %',
-            value: `\`-${stopLoss.dropPercentage}%\``,
-            inline: true,
-          },
-          {
-            name: '💰 Entry Price',
-            value: `\`$${stopLoss.basePrice.toFixed(4)}\``,
-            inline: true,
-          },
-          {
-            name: '⚡ Trigger Price',
-            value: `\`$${(stopLoss.basePrice * (1 - stopLoss.dropPercentage / 100)).toFixed(4)}\``,
-            inline: true,
-          },
-          {
-            name: '📉 Current Price',
-            value: `\`$${currentPrice.toFixed(4)}\``,
-            inline: true,
-          },
-          {
-            name: '📊 Price Change',
-            value: `\`${priceChange}%\` 📉`,
-            inline: true,
-          },
-          {
-            name: '💵 YES Price',
-            value: `\`$${(marketData.yes_price || 0).toFixed(4)}\``,
-            inline: true,
-          },
-          {
-            name: '🚫 NO Price',
-            value: `\`$${(marketData.no_price || 0).toFixed(4)}\``,
-            inline: true,
-          }
-        );
-
-      if (order) {
-        embed.addFields(
-          {
-            name: '✅ Order Executed',
-            value: `Order ID: \`${order.order_id}\``,
-            inline: false,
-          },
-          {
-            name: '📈 Quantity Sold',
-            value: `\`${order.quantity}\` contracts`,
-            inline: true,
-          },
-          {
-            name: '💵 Order Status',
-            value: `\`${order.status || 'PENDING'}\``,
-            inline: true,
-          }
-        );
-      } else if (errorMessage) {
-        embed.addFields({
-          name: '❌ Error',
-          value: `\`${errorMessage}\``,
-          inline: false,
-        });
-      }
-
-      embed
-        .setFooter({
-          text: 'Stop loss triggered and position closed',
-        })
+          { name: 'Reference price', value: `$${stopLoss.basePrice.toFixed(4)}`, inline: true },
+          { name: 'Trigger price', value: `$${(stopLoss.basePrice * (1 - stopLoss.dropPercentage / 100)).toFixed(4)}`, inline: true },
+          { name: 'Observed price', value: `$${currentPrice.toFixed(4)}`, inline: true },
+          { name: 'Exit result', value: result.slice(0, 1000), inline: false },
+        )
+        .setFooter({ text: 'IOC orders may partially fill or remain unfilled; verify positions in Kalshi.' })
         .setTimestamp();
-
       await user.send({ embeds: [embed] });
-      console.log(`✅ Stop loss DM sent to user ${stopLoss.userId}`);
-    } catch (err) {
-      console.error('Error sending stop loss DM:', err);
+    } catch (error) {
+      console.error('Could not send stop-loss report DM:', error);
     }
   }
 
-  /**
-   * Stop a stop loss
-   */
-  stopStopLoss(userId: string, marketTicker: string, side: string) {
-    const stopLossId = `${userId}-${marketTicker}-${side}`;
-    const ws = this.activeStopLosses.get(stopLossId);
-
-    if (ws) {
-      ws.close();
-      this.activeStopLosses.delete(stopLossId);
-      return true;
-    }
-
-    return false;
+  stopStopLoss(userId: string, ticker: string, side: string) {
+    const id = `${userId}-${ticker}-${side}`;
+    const ws = this.activeStopLosses.get(id);
+    if (!ws) return false;
+    ws.close();
+    this.activeStopLosses.delete(id);
+    return true;
   }
 
-  /**
-   * Get all active stop losses for a user
-   */
-  getActiveStopLosses(userId: string): string[] {
-    return Array.from(this.activeStopLosses.keys()).filter(key =>
-      key.startsWith(userId)
-    );
+  getActiveStopLosses(userId: string) {
+    return Array.from(this.activeStopLosses.keys()).filter(key => key.startsWith(`${userId}-`));
   }
 
-  /**
-   * Stop all stop losses for a user
-   */
   stopAllStopLosses(userId: string) {
-    const userStopLosses = this.getActiveStopLosses(userId);
-    for (const stopLossId of userStopLosses) {
-      const ws = this.activeStopLosses.get(stopLossId);
-      if (ws) ws.close();
-      this.activeStopLosses.delete(stopLossId);
+    const ids = this.getActiveStopLosses(userId);
+    for (const id of ids) {
+      this.activeStopLosses.get(id)?.close();
+      this.activeStopLosses.delete(id);
     }
-    return userStopLosses.length;
+    return ids.length;
   }
 }
 
-// Export singleton
 export const stopLossManager = new StopLossManager();

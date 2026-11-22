@@ -1,249 +1,88 @@
 /**
  * /alert command
- * Set up price alerts for markets
+ * Set alerts against the latest Kalshi market price.
  */
-
-import {
-  SlashCommandBuilder,
-  ChatInputCommandInteraction,
-  EmbedBuilder,
-} from 'discord.js';
+import { SlashCommandBuilder, ChatInputCommandInteraction, EmbedBuilder } from 'discord.js';
 import * as dotenv from 'dotenv';
 import { kalshiUserManager } from '../kalshi-user-manager.js';
 import { alertManager } from '../alert-manager.js';
-
+import { kalshiAPIClient } from '../kalshi-api-client.js';
 dotenv.config();
 
 export const alertCommand = new SlashCommandBuilder()
   .setName('alert')
-  .setDescription('Set up price alerts for markets')
-  .addSubcommand(subcommand =>
-    subcommand
-      .setName('set')
-      .setDescription('Set a new price alert')
-      .addStringOption(option =>
-        option
-          .setName('ticker')
-          .setDescription('Market ticker (e.g., KXKHAMENEIOUT-AKHA-26SEP01)')
-          .setRequired(true)
-      )
-      .addStringOption(option =>
-        option
-          .setName('side')
-          .setDescription('Which side to monitor: YES or NO')
-          .addChoices(
-            { name: 'YES', value: 'yes' },
-            { name: 'NO', value: 'no' }
-          )
-          .setRequired(true)
-      )
-      .addNumberOption(option =>
-        option
-          .setName('percentage')
-          .setDescription('Price increase threshold in % (e.g., 10 for +10%)')
-          .setMinValue(0.1)
-          .setMaxValue(100)
-          .setRequired(true)
-      )
-  )
-  .addSubcommand(subcommand =>
-    subcommand
-      .setName('list')
-      .setDescription('View all your active alerts')
-  )
-  .addSubcommand(subcommand =>
-    subcommand
-      .setName('stop')
-      .setDescription('Stop an active alert')
-      .addStringOption(option =>
-        option
-          .setName('ticker')
-          .setDescription('Market ticker to stop monitoring')
-          .setRequired(true)
-      )
-      .addStringOption(option =>
-        option
-          .setName('side')
-          .setDescription('Which side (YES or NO)')
-          .addChoices(
-            { name: 'YES', value: 'yes' },
-            { name: 'NO', value: 'no' }
-          )
-          .setRequired(true)
-      )
-  );
+  .setDescription('Set price alerts for Kalshi markets')
+  .addSubcommand(sub => sub.setName('set').setDescription('Set a price alert')
+    .addStringOption(o => o.setName('ticker').setDescription('Exact market ticker from /markets').setRequired(true))
+    .addStringOption(o => o.setName('side').setDescription('YES or NO price to monitor').addChoices({name:'YES',value:'yes'},{name:'NO',value:'no'}).setRequired(true))
+    .addNumberOption(o => o.setName('percentage').setDescription('Alert when price rises by this percentage').setMinValue(0.1).setMaxValue(100).setRequired(true)))
+  .addSubcommand(sub => sub.setName('list').setDescription('List active price alerts'))
+  .addSubcommand(sub => sub.setName('stop').setDescription('Stop an active price alert')
+    .addStringOption(o => o.setName('ticker').setDescription('Market ticker').setRequired(true))
+    .addStringOption(o => o.setName('side').setDescription('YES or NO').addChoices({name:'YES',value:'yes'},{name:'NO',value:'no'}).setRequired(true)));
 
 export async function executeAlert(interaction: ChatInputCommandInteraction) {
-  const subcommand = (interaction.options as any).getSubcommand();
+  await interaction.deferReply({ ephemeral: true });
   const userId = interaction.user.id;
-
   try {
-    // Reply immediately to prevent Discord timeout (3 second window)
-    try {
-      if (!interaction.replied) {
-        await interaction.reply({
-          content: '⏳ Processing...',
-          ephemeral: true,
-        });
-      }
-    } catch (replyErr) {
-      console.error('Failed to reply to interaction:', replyErr);
-      return; // Exit if we can't reply
-    }
-
+    const subcommand = interaction.options.getSubcommand();
     if (subcommand === 'set') {
-      await handleSetAlert(interaction, userId);
-    } else if (subcommand === 'list') {
-      await handleListAlerts(interaction, userId);
-    } else if (subcommand === 'stop') {
-      await handleStopAlert(interaction, userId);
+      const ticker = interaction.options.getString('ticker', true).trim().toUpperCase();
+      const side = interaction.options.getString('side', true) as 'yes' | 'no';
+      const percentage = interaction.options.getNumber('percentage', true);
+      const account = await kalshiUserManager.getKalshiUser(userId);
+      if (!account?.kalshi_api_key || !account?.kalshi_private_key) {
+        await interaction.editReply({ content: '❌ Link your Kalshi account with /link before setting alerts.' });
+        return;
+      }
+
+      const market = await kalshiAPIClient.getMarketDetails(ticker);
+      if (!market) {
+        await interaction.editReply({ content: `❌ Kalshi market ${ticker} was not found.` });
+        return;
+      }
+      const yesLast = market.last_price_dollars !== undefined
+        ? Number(market.last_price_dollars)
+        : (market.last_price !== undefined ? market.last_price / 100 : NaN);
+      if (!Number.isFinite(yesLast) || yesLast <= 0 || yesLast >= 1) {
+        await interaction.editReply({ content: '❌ This market has no usable last-traded price yet, so an alert reference price cannot be set safely.' });
+        return;
+      }
+      const basePrice = side === 'yes' ? yesLast : 1 - yesLast;
+      await alertManager.startAlert({
+        userId, marketTicker: ticker, side, basePrice,
+        percentageThreshold: percentage,
+        apiKey: account.kalshi_api_key,
+        privateKey: account.kalshi_private_key,
+      });
+      delete (account as any).kalshi_api_key;
+      delete (account as any).kalshi_private_key;
+
+      const embed = new EmbedBuilder().setColor(0x00aa66)
+        .setTitle('✅ Kalshi Price Alert Started')
+        .setDescription(`Monitoring **${ticker}** for a ${side.toUpperCase()} price increase.`)
+        .addFields(
+          { name: 'Reference price', value: `$${basePrice.toFixed(4)}`, inline: true },
+          { name: 'Trigger threshold', value: `+${percentage}%`, inline: true },
+          { name: 'Trigger price', value: `$${(basePrice * (1 + percentage / 100)).toFixed(4)}`, inline: true },
+        )
+        .setFooter({ text: 'Reference price is the latest Kalshi last-traded price at setup.' });
+      await interaction.editReply({ embeds: [embed] });
+      return;
+    }
+    if (subcommand === 'list') {
+      const ids = alertManager.getActiveAlerts(userId);
+      await interaction.editReply({ content: ids.length ? `Active alerts:\n${ids.map(id => `• ${id.slice(userId.length + 1)}`).join('\n')}` : 'No active price alerts.' });
+      return;
+    }
+    if (subcommand === 'stop') {
+      const ticker = interaction.options.getString('ticker', true).trim().toUpperCase();
+      const side = interaction.options.getString('side', true);
+      const stopped = alertManager.stopAlert(userId, ticker, side);
+      await interaction.editReply({ content: stopped ? `🛑 Stopped alert for ${ticker} (${side.toUpperCase()}).` : `No active alert found for ${ticker} (${side.toUpperCase()}).` });
     }
   } catch (error) {
-    console.error('Error in alert command:', error);
-    // Only try to edit if we have a valid interaction
-    if (interaction.replied) {
-      try {
-        await interaction.editReply({
-          content: `❌ **Error!** ${error instanceof Error ? error.message : 'Unknown error'}`,
-        });
-      } catch (e) {
-        console.error('Failed to edit reply:', e);
-      }
-    }
+    console.error('Error in /alert command:', error);
+    await interaction.editReply({ content: '❌ Could not complete the alert request. Check the bot logs for details.' });
   }
-}
-
-async function handleSetAlert(
-  interaction: ChatInputCommandInteraction,
-  userId: string
-) {
-  const ticker = ((interaction.options as any).getString('ticker') || '').toUpperCase();
-  const side = ((interaction.options as any).getString('side') || 'yes') as 'yes' | 'no';
-  const percentage = (interaction.options as any).getNumber('percentage') || 10;
-
-  // Get user's Kalshi account
-  const kalshiUser = await kalshiUserManager.getKalshiUser(userId);
-
-  if (!kalshiUser || !kalshiUser.kalshi_api_key || !kalshiUser.kalshi_private_key) {
-    return await interaction.editReply({
-      content: '❌ **No Kalshi Account Linked**\n\nUse `/link` to connect your Kalshi account first!',
-    });
-  }
-
-  // Get current price from position
-  // For now, we'll use a placeholder - in real usage, fetch from API
-  const basePrice = 0.50; // Default entry price
-
-  // Start the alert
-  alertManager.startAlert({
-    userId,
-    marketTicker: ticker,
-    side,
-    basePrice,
-    percentageThreshold: percentage,
-    apiKey: kalshiUser.kalshi_api_key,
-    privateKey: kalshiUser.kalshi_private_key,
-  });
-
-  const embed = new EmbedBuilder()
-    .setColor(0x00ff00)
-    .setTitle('✅ Alert Set Successfully!')
-    .setDescription(`Monitoring **${ticker}** for ${side.toUpperCase()} price changes`)
-    .addFields(
-      {
-        name: '📊 Market Ticker',
-        value: `\`${ticker}\``,
-        inline: true,
-      },
-      {
-        name: '📈 Side',
-        value: side.toUpperCase(),
-        inline: true,
-      },
-      {
-        name: '🔥 Threshold',
-        value: `\`+${percentage}%\``,
-        inline: true,
-      },
-      {
-        name: '📍 Base Price',
-        value: `\`$${basePrice.toFixed(4)}\``,
-        inline: true,
-      },
-      {
-        name: '⚡ Trigger Price',
-        value: `\`$${(basePrice * (1 + percentage / 100)).toFixed(4)}\``,
-        inline: true,
-      },
-      {
-        name: '💬 Notification',
-        value: 'You\'ll receive a DM when price reaches the threshold',
-        inline: false,
-      }
-    )
-    .setFooter({
-      text: 'Use /alert list to see all active alerts',
-    })
-    .setTimestamp();
-
-  await interaction.editReply({ embeds: [embed] });
-}
-
-async function handleListAlerts(
-  interaction: ChatInputCommandInteraction,
-  userId: string
-) {
-  const activeAlerts = alertManager.getActiveAlerts(userId);
-
-  if (activeAlerts.length === 0) {
-    return await interaction.editReply({
-      content: '📊 **No active alerts!** Use `/alert set` to create one.',
-    });
-  }
-
-  let description = '';
-  for (const alertId of activeAlerts) {
-    const [, ticker, side] = alertId.split('-');
-    description += `\n✅ \`${ticker}\` (${side.toUpperCase()})`;
-  }
-
-  const embed = new EmbedBuilder()
-    .setColor(0x3498db)
-    .setTitle('📢 Your Active Alerts')
-    .setDescription(description.trim())
-    .addFields({
-      name: '🎯 Total Active',
-      value: `\`${activeAlerts.length}\``,
-      inline: false,
-    })
-    .setFooter({
-      text: 'Use /alert stop <ticker> <side> to remove an alert',
-    })
-    .setTimestamp();
-
-  await interaction.editReply({ embeds: [embed] });
-}
-
-async function handleStopAlert(
-  interaction: ChatInputCommandInteraction,
-  userId: string
-) {
-  const ticker = ((interaction.options as any).getString('ticker') || '').toUpperCase();
-  const side = ((interaction.options as any).getString('side') || 'yes') as 'yes' | 'no';
-
-  const stopped = alertManager.stopAlert(userId, ticker, side);
-
-  if (!stopped) {
-    return await interaction.editReply({
-      content: `❌ **Alert not found!** No active alert for \`${ticker}\` (${side.toUpperCase()})`,
-    });
-  }
-
-  const embed = new EmbedBuilder()
-    .setColor(0xff6b6b)
-    .setTitle('🛑 Alert Stopped')
-    .setDescription(`Stopped monitoring **${ticker}** for ${side.toUpperCase()} price changes`)
-    .setTimestamp();
-
-  await interaction.editReply({ embeds: [embed] });
 }

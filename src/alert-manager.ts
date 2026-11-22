@@ -1,14 +1,11 @@
 /**
- * WebSocket Alert Manager
- * Monitor price changes and alert users via DM
+ * Kalshi WebSocket price-alert manager.
  */
-
 import WebSocket from 'ws';
 import { Client, EmbedBuilder } from 'discord.js';
 import axios from 'axios';
 import crypto from 'crypto';
 import * as dotenv from 'dotenv';
-
 dotenv.config();
 
 const KALSHI_BASE_URL = process.env.KALSHI_BASE_URL || 'https://demo-api.kalshi.co';
@@ -18,314 +15,196 @@ export interface PriceAlert {
   marketTicker: string;
   side: 'yes' | 'no';
   basePrice: number;
-  percentageThreshold: number; // e.g., 10 for 10%
+  percentageThreshold: number;
   apiKey: string;
   privateKey: string;
 }
 
-interface MarketUpdate {
+interface TickerMessage {
   market_ticker: string;
-  yes_price?: number;
-  no_price?: number;
-  timestamp?: number;
+  price_dollars?: string;
+  yes_bid_dollars?: string;
+  yes_ask_dollars?: string;
+  ts_ms?: number;
 }
 
 export class AlertManager {
-  private activeAlerts: Map<string, WebSocket> = new Map();
+  private activeAlerts = new Map<string, WebSocket>();
   private discordClient: Client | null = null;
 
-  setDiscordClient(client: Client) {
-    this.discordClient = client;
-  }
+  setDiscordClient(client: Client) { this.discordClient = client; }
 
-  /**
-   * Start monitoring a market with price alerts
-   */
-  startAlert(alert: PriceAlert) {
+  async startAlert(alert: PriceAlert): Promise<void> {
     const alertId = `${alert.userId}-${alert.marketTicker}-${alert.side}`;
+    const existing = this.activeAlerts.get(alertId);
+    if (existing) existing.close();
 
-    // Stop existing alert if running
-    if (this.activeAlerts.has(alertId)) {
-      const existingWs = this.activeAlerts.get(alertId);
-      if (existingWs) existingWs.close();
-    }
-
-    const WS_URL = process.env.KALSHI_BASE_URL?.includes('demo') 
-      ? 'wss://demo-api.kalshi.co/trade-api/ws/v2'
-      : 'wss://api.elections.kalshi.com/trade-api/ws/v2';
-
-    console.log(`🔌 Starting alert for ${alertId}...`);
+    const isDemo = KALSHI_BASE_URL.includes('demo');
+    const wsUrl = isDemo
+      ? 'wss://external-api-ws.demo.kalshi.co/trade-api/ws/v2'
+      : 'wss://external-api-ws.kalshi.com/trade-api/ws/v2';
 
     try {
-      // Generate authentication headers for WebSocket
-      const timestamp = Math.floor(Date.now() / 1000).toString();
-      const message = timestamp + 'GET/trade-api/ws/v2';
-      
+      // Kalshi requires the timestamp in milliseconds for WebSocket authentication.
+      const timestamp = Date.now().toString();
       const sign = crypto.createSign('RSA-SHA256');
-      sign.update(message);
+      sign.update(timestamp + 'GET/trade-api/ws/v2');
+      sign.end();
       const signature = sign.sign({
         key: alert.privateKey,
-        format: 'pem',
-        type: 'pkcs8',
         padding: crypto.constants.RSA_PKCS1_PSS_PADDING,
         saltLength: crypto.constants.RSA_PSS_SALTLEN_DIGEST,
       }, 'base64');
 
-      const headers = {
-        'KALSHI-ACCESS-KEY': alert.apiKey,
-        'KALSHI-ACCESS-SIGNATURE': signature,
-        'KALSHI-ACCESS-TIMESTAMP': timestamp,
-      };
-
-      const ws = new WebSocket(WS_URL, {
-        headers,
+      const ws = new WebSocket(wsUrl, {
+        headers: {
+          'KALSHI-ACCESS-KEY': alert.apiKey,
+          'KALSHI-ACCESS-SIGNATURE': signature,
+          'KALSHI-ACCESS-TIMESTAMP': timestamp,
+        },
       });
 
       ws.on('open', () => {
-        console.log(`✅ WS connected for ${alertId}`);
-
-        // Subscribe to market ticker
-        ws.send(
-          JSON.stringify({
-            id: 1,
-            cmd: 'subscribe',
-            params: {
-              channels: ['market_ticker'],
-              market_ticker: alert.marketTicker,
-            },
-          })
-        );
+        console.log(`✅ Kalshi ticker stream connected for ${alertId}`);
+        ws.send(JSON.stringify({
+          id: 1,
+          cmd: 'subscribe',
+          params: { channels: ['ticker'], market_ticker: alert.marketTicker },
+        }));
       });
 
-      ws.on('message', async (raw) => {
+      ws.on('message', async raw => {
         try {
-          const msg = JSON.parse(raw.toString());
+          const message = JSON.parse(raw.toString());
+          if (message.type !== 'ticker' || !message.msg) return;
+          const data = message.msg as TickerMessage;
+          if (data.market_ticker !== alert.marketTicker || !data.price_dollars) return;
 
-          if (msg.type !== 'market_ticker') return;
-
-          const data: MarketUpdate = msg.data;
-
-          if (data.market_ticker !== alert.marketTicker) return;
-
-          const currentPrice =
-            alert.side === 'yes' ? data.yes_price : data.no_price;
-
-          if (!currentPrice) return;
-
-          // 🔥 Check if threshold reached
+          const yesPrice = Number(data.price_dollars);
+          if (!Number.isFinite(yesPrice) || yesPrice <= 0 || yesPrice >= 1) return;
+          const currentPrice = alert.side === 'yes' ? yesPrice : 1 - yesPrice;
           const triggerPrice = alert.basePrice * (1 + alert.percentageThreshold / 100);
 
           if (currentPrice >= triggerPrice) {
-            console.log(`🚨 ALERT TRIGGERED for ${alertId}! Price: ${currentPrice}`);
+            console.log(`🚨 Price alert triggered for ${alertId}: ${currentPrice}`);
             await this.sendAlert(alert, currentPrice, data);
-            ws.close(); // Auto stop after trigger
+            ws.close();
             this.activeAlerts.delete(alertId);
           }
-        } catch (err) {
-          console.error('Error processing WS message:', err);
+        } catch (error) {
+          console.error('Error processing Kalshi ticker update:', error);
         }
       });
 
-      ws.on('error', (err) => {
-        console.error(`❌ WS error for ${alertId}:`, err);
-      });
-
+      ws.on('error', error => console.error(`❌ Kalshi WebSocket error for ${alertId}:`, error));
       ws.on('close', () => {
-        console.log(`🔌 WS closed for ${alertId}`);
-        this.activeAlerts.delete(alertId);
+        console.log(`🔌 Kalshi ticker stream closed for ${alertId}`);
+        if (this.activeAlerts.get(alertId) === ws) this.activeAlerts.delete(alertId);
       });
-
       this.activeAlerts.set(alertId, ws);
-    } catch (err) {
-      console.error('Error starting alert:', err);
+      await new Promise<void>((resolve, reject) => {
+        let connected = false;
+        const timeout = setTimeout(() => {
+          if (!connected) {
+            ws.close();
+            if (this.activeAlerts.get(alertId) === ws) this.activeAlerts.delete(alertId);
+            reject(new Error('Kalshi WebSocket connection timed out.'));
+          }
+        }, 15000);
+        ws.once('open', () => { connected = true; clearTimeout(timeout); resolve(); });
+        ws.once('error', error => {
+          if (!connected) {
+            clearTimeout(timeout);
+            if (this.activeAlerts.get(alertId) === ws) this.activeAlerts.delete(alertId);
+            reject(error);
+          }
+        });
+      });
+    } catch (error) {
+      console.error('Could not start Kalshi price alert:', error);
+      throw error;
     }
   }
 
-  /**
-   * Send alert DM to user with market info
-   */
-  private async sendAlert(
-    alert: PriceAlert,
-    currentPrice: number,
-    marketData: MarketUpdate
-  ) {
-    if (!this.discordClient) {
-      console.error('Discord client not initialized');
-      return;
-    }
-
+  private async sendAlert(alert: PriceAlert, currentPrice: number, marketData: TickerMessage) {
+    if (!this.discordClient) return;
     try {
-      // Fetch market details via API
-      const marketInfo = await this.fetchMarketDetails(
-        alert.marketTicker,
-        alert.apiKey,
-        alert.privateKey
-      );
-
-      // Get user
+      const marketInfo = await this.fetchMarketDetails(alert.marketTicker, alert.apiKey, alert.privateKey);
       const user = await this.discordClient.users.fetch(alert.userId);
-
-      const percentageMove = (
-        ((currentPrice - alert.basePrice) / alert.basePrice) *
-        100
-      ).toFixed(2);
+      const percentageMove = ((currentPrice - alert.basePrice) / alert.basePrice * 100).toFixed(2);
+      const yesPrice = marketData.price_dollars ? Number(marketData.price_dollars) : 0;
+      const noPrice = 1 - yesPrice;
 
       const embed = new EmbedBuilder()
-        .setColor(0xff6b6b) // Red for alert
-        .setTitle('🚨 Price Alert Triggered!')
-        .setDescription(
-          `**${alert.marketTicker}**\n\n${marketInfo?.title || 'Market'}`
-        )
+        .setColor(0xff6b6b)
+        .setTitle('🚨 Kalshi Price Alert Triggered')
+        .setDescription(`**${alert.marketTicker}**\n${marketInfo?.title || 'Market'}`)
         .addFields(
-          {
-            name: '📊 Market Ticker',
-            value: `\`${alert.marketTicker}\``,
-            inline: true,
-          },
-          {
-            name: '🎯 Event',
-            value: `\`${marketInfo?.event_ticker || 'N/A'}\``,
-            inline: true,
-          },
-          {
-            name: '📈 Side Watched',
-            value: alert.side.toUpperCase(),
-            inline: true,
-          },
-          {
-            name: '💰 Entry Price',
-            value: `\`$${alert.basePrice.toFixed(4)}\``,
-            inline: true,
-          },
-          {
-            name: '⚡ Current Price',
-            value: `\`$${currentPrice.toFixed(4)}\``,
-            inline: true,
-          },
-          {
-            name: `🔥 Movement`,
-            value: `\`+${percentageMove}%\` 📈`,
-            inline: true,
-          },
-          {
-            name: '❓ Question',
-            value:
-              marketInfo?.title ||
-              'N/A',
-            inline: false,
-          },
-          {
-            name: '📝 Details',
-            value:
-              marketInfo?.subtitle ||
-              'No details available',
-            inline: false,
-          },
-          {
-            name: '🔄 Market Status',
-            value: `\`${marketInfo?.status || 'UNKNOWN'}\``,
-            inline: true,
-          },
-          {
-            name: '💵 YES Price',
-            value: `\`$${(marketData.yes_price || 0).toFixed(4)}\``,
-            inline: true,
-          },
-          {
-            name: '🚫 NO Price',
-            value: `\`$${(marketData.no_price || 0).toFixed(4)}\``,
-            inline: true,
-          }
+          { name: 'Side watched', value: alert.side.toUpperCase(), inline: true },
+          { name: 'Reference price', value: `$${alert.basePrice.toFixed(4)}`, inline: true },
+          { name: 'Current price', value: `$${currentPrice.toFixed(4)}`, inline: true },
+          { name: 'Movement', value: `+${percentageMove}%`, inline: true },
+          { name: 'YES last price', value: `$${yesPrice.toFixed(4)}`, inline: true },
+          { name: 'NO implied price', value: `$${noPrice.toFixed(4)}`, inline: true },
+          { name: 'Market status', value: String(marketInfo?.status || 'unknown'), inline: true },
         )
-        .setFooter({
-          text: `Alert set at ${alert.percentageThreshold}% threshold • Use /alerts to manage`,
-        })
+        .setFooter({ text: `Alert threshold: +${alert.percentageThreshold}%` })
         .setTimestamp();
 
       await user.send({ embeds: [embed] });
-      console.log(`✅ Alert DM sent to user ${alert.userId}`);
-    } catch (err) {
-      console.error('Error sending alert DM:', err);
+    } catch (error) {
+      console.error('Could not send Kalshi alert DM:', error);
     }
   }
 
-  /**
-   * Fetch market details from Kalshi API
-   */
-  private async fetchMarketDetails(
-    ticker: string,
-    apiKey: string,
-    privateKey: string
-  ) {
+  private async fetchMarketDetails(ticker: string, apiKey: string, privateKey: string) {
     try {
-      const method = 'GET';
-      const apiPath = `/trade-api/v2/markets/${ticker}`;
-      const timestampStr = Date.now().toString();
-
-      const msgString = timestampStr + method + apiPath;
-
+      const path = `/trade-api/v2/markets/${encodeURIComponent(ticker)}`;
+      const timestamp = Date.now().toString();
       const sign = crypto.createSign('RSA-SHA256');
-      sign.update(msgString);
+      sign.update(timestamp + 'GET' + path);
       sign.end();
-
       const signature = sign.sign({
         key: privateKey,
         padding: crypto.constants.RSA_PKCS1_PSS_PADDING,
         saltLength: crypto.constants.RSA_PSS_SALTLEN_DIGEST,
+      }, 'base64');
+      const response = await axios.get(KALSHI_BASE_URL.replace(/\/+$/, '') + path, {
+        headers: {
+          'KALSHI-ACCESS-KEY': apiKey,
+          'KALSHI-ACCESS-SIGNATURE': signature,
+          'KALSHI-ACCESS-TIMESTAMP': timestamp,
+        },
+        timeout: 15000,
       });
-
-      const headers = {
-        'KALSHI-ACCESS-KEY': apiKey,
-        'KALSHI-ACCESS-SIGNATURE': signature.toString('base64'),
-        'KALSHI-ACCESS-TIMESTAMP': timestampStr,
-      };
-
-      const response = await axios.get(KALSHI_BASE_URL + apiPath, { headers });
-      return response.data.market;
-    } catch (err) {
-      console.error('Error fetching market details:', err);
+      return response.data?.market || null;
+    } catch (error) {
+      console.error('Could not fetch Kalshi market details for alert:', error);
       return null;
     }
   }
 
-  /**
-   * Stop an alert
-   */
   stopAlert(userId: string, marketTicker: string, side: string) {
-    const alertId = `${userId}-${marketTicker}-${side}`;
-    const ws = this.activeAlerts.get(alertId);
-
-    if (ws) {
-      ws.close();
-      this.activeAlerts.delete(alertId);
-      return true;
-    }
-
-    return false;
+    const id = `${userId}-${marketTicker}-${side}`;
+    const ws = this.activeAlerts.get(id);
+    if (!ws) return false;
+    ws.close();
+    this.activeAlerts.delete(id);
+    return true;
   }
 
-  /**
-   * Get all active alerts for a user
-   */
-  getActiveAlerts(userId: string): string[] {
-    return Array.from(this.activeAlerts.keys()).filter(key =>
-      key.startsWith(userId)
-    );
+  getActiveAlerts(userId: string) {
+    return Array.from(this.activeAlerts.keys()).filter(key => key.startsWith(`${userId}-`));
   }
 
-  /**
-   * Stop all alerts for a user
-   */
   stopAllAlerts(userId: string) {
-    const userAlerts = this.getActiveAlerts(userId);
-    for (const alertId of userAlerts) {
-      const ws = this.activeAlerts.get(alertId);
-      if (ws) ws.close();
-      this.activeAlerts.delete(alertId);
+    const ids = this.getActiveAlerts(userId);
+    for (const id of ids) {
+      this.activeAlerts.get(id)?.close();
+      this.activeAlerts.delete(id);
     }
-    return userAlerts.length;
+    return ids.length;
   }
 }
 
-// Export singleton
 export const alertManager = new AlertManager();
