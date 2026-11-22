@@ -99,9 +99,27 @@ export class AlertManager {
       ws.on('error', error => console.error(`❌ Kalshi WebSocket error for ${alertId}:`, error));
       ws.on('close', () => {
         console.log(`🔌 Kalshi ticker stream closed for ${alertId}`);
-        this.activeAlerts.delete(alertId);
+        if (this.activeAlerts.get(alertId) === ws) this.activeAlerts.delete(alertId);
       });
       this.activeAlerts.set(alertId, ws);
+      await new Promise<void>((resolve, reject) => {
+        let connected = false;
+        const timeout = setTimeout(() => {
+          if (!connected) {
+            ws.close();
+            if (this.activeAlerts.get(alertId) === ws) this.activeAlerts.delete(alertId);
+            reject(new Error('Kalshi WebSocket connection timed out.'));
+          }
+        }, 15000);
+        ws.once('open', () => { connected = true; clearTimeout(timeout); resolve(); });
+        ws.once('error', error => {
+          if (!connected) {
+            clearTimeout(timeout);
+            if (this.activeAlerts.get(alertId) === ws) this.activeAlerts.delete(alertId);
+            reject(error);
+          }
+        });
+      });
     } catch (error) {
       console.error('Could not start Kalshi price alert:', error);
       throw error;
