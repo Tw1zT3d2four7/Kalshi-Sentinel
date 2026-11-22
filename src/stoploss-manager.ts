@@ -120,7 +120,7 @@ export class StopLossManager {
       });
 
       ws.on('close', () => {
-        this.activeStopLosses.delete(id);
+        if (this.activeStopLosses.get(id) === ws) this.activeStopLosses.delete(id);
         console.log(`Kalshi ticker stream closed for stop loss ${id}`);
       });
     });
