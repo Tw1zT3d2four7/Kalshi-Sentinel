@@ -62,6 +62,7 @@ export class StopLossManager {
     });
     this.activeStopLosses.set(id, ws);
 
+    let hasExecuted = false;
     await new Promise<void>((resolve, reject) => {
       let connected = false;
       const timeout = setTimeout(() => {
@@ -124,8 +125,6 @@ export class StopLossManager {
       });
     });
 
-    // This flag is scoped to this monitor and prevents duplicate order submissions.
-    function noop() {}
   }
 
   private async executeSellOrder(stopLoss: StopLossOrder, currentPrice: number, market: TickerMessage) {
