@@ -57,8 +57,6 @@ export class DatabaseManager {
       serverSelectionTimeoutMS: 10000,
       socketTimeoutMS: 60000,
       connectTimeoutMS: 10000,
-      // Try without strict TLS validation
-      tls: true,
     });
   }
 
