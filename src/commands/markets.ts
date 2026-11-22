@@ -5,7 +5,7 @@
 
 import {
   SlashCommandBuilder,
-  CommandInteraction,
+  ChatInputCommandInteraction,
   EmbedBuilder,
   ActionRowBuilder,
   ButtonBuilder,
@@ -23,7 +23,7 @@ export const marketsCommand = new SlashCommandBuilder()
       .setRequired(false)
   );
 
-export async function executeMarkets(interaction: CommandInteraction) {
+export async function executeMarkets(interaction: ChatInputCommandInteraction) {
   await interaction.deferReply({ ephemeral: false });
 
   try {
