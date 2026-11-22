@@ -308,12 +308,12 @@ A Docker Compose deployment with persistent MongoDB storage is available.
 See [Docker deployment](docs/DOCKER.md) for configuration, startup, upgrades,
 and GHCR image details.
 
-Quick start:
+Quick start (see [Docker deployment](docs/DOCKER.md) for the exact `.env` values):
 
 ```bash
 cp .env.example .env
 # Set CLIENT_TOKEN, APPLICATION_ID, and ENCRYPTION_KEY in .env
-docker compose build
+docker compose pull
 docker compose up -d
 docker compose logs -f kalshi-sentinel
 ```
