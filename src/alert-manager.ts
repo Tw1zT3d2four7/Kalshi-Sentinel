@@ -34,7 +34,7 @@ export class AlertManager {
 
   setDiscordClient(client: Client) { this.discordClient = client; }
 
-  startAlert(alert: PriceAlert) {
+  async startAlert(alert: PriceAlert): Promise<void> {
     const alertId = `${alert.userId}-${alert.marketTicker}-${alert.side}`;
     const existing = this.activeAlerts.get(alertId);
     if (existing) existing.close();
