@@ -58,14 +58,10 @@ if (!MONGODB_URI) {
   throw new Error("No MONGODB_URI provided.");
 }
 
-// Create a new client instance with necessary intents
-const client = new Client({ 
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.DirectMessages,
-    GatewayIntentBits.MessageContent,
-  ] 
+// Slash commands and interaction handling only require the Guilds intent.
+// Avoid privileged message-content access and unused message intents.
+const client = new Client({
+  intents: [GatewayIntentBits.Guilds],
 });
 
 client.once(Events.ClientReady, async (discord) => {
