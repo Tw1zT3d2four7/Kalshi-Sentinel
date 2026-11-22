@@ -41,7 +41,7 @@ export class AlertManager {
 
     const isDemo = KALSHI_BASE_URL.includes('demo');
     const wsUrl = isDemo
-      ? 'wss://demo-api.kalshi.co/trade-api/ws/v2'
+      ? 'wss://external-api-ws.demo.kalshi.co/trade-api/ws/v2'
       : 'wss://external-api-ws.kalshi.com/trade-api/ws/v2';
 
     try {
