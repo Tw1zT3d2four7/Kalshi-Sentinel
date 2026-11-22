@@ -5,7 +5,7 @@
 
 import {
   SlashCommandBuilder,
-  CommandInteraction,
+  ChatInputCommandInteraction,
   EmbedBuilder,
 } from 'discord.js';
 import * as dotenv from 'dotenv';
@@ -73,7 +73,7 @@ export const stoplossCommand = new SlashCommandBuilder()
       )
   );
 
-export async function executeStopLoss(interaction: CommandInteraction) {
+export async function executeStopLoss(interaction: ChatInputCommandInteraction) {
   const subcommand = (interaction.options as any).getSubcommand();
   const userId = interaction.user.id;
 
@@ -114,7 +114,7 @@ export async function executeStopLoss(interaction: CommandInteraction) {
 }
 
 async function handleSetStopLoss(
-  interaction: CommandInteraction,
+  interaction: ChatInputCommandInteraction,
   userId: string
 ) {
   const ticker = ((interaction.options as any).getString('ticker') || '').toUpperCase();
@@ -197,7 +197,7 @@ async function handleSetStopLoss(
 }
 
 async function handleListStopLosses(
-  interaction: CommandInteraction,
+  interaction: ChatInputCommandInteraction,
   userId: string
 ) {
   const activeStopLosses = stopLossManager.getActiveStopLosses(userId);
@@ -232,7 +232,7 @@ async function handleListStopLosses(
 }
 
 async function handleStopStopLoss(
-  interaction: CommandInteraction,
+  interaction: ChatInputCommandInteraction,
   userId: string
 ) {
   const ticker = ((interaction.options as any).getString('ticker') || '').toUpperCase();
