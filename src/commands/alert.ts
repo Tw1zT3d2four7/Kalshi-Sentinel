@@ -49,7 +49,7 @@ export async function executeAlert(interaction: ChatInputCommandInteraction) {
         return;
       }
       const basePrice = side === 'yes' ? yesLast : 1 - yesLast;
-      alertManager.startAlert({
+      await alertManager.startAlert({
         userId, marketTicker: ticker, side, basePrice,
         percentageThreshold: percentage,
         apiKey: account.kalshi_api_key,
