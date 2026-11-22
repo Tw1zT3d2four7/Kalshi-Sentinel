@@ -5,7 +5,7 @@
 
 import {
   SlashCommandBuilder,
-  CommandInteraction,
+  ChatInputCommandInteraction,
   EmbedBuilder,
 } from 'discord.js';
 import axios from 'axios';
@@ -29,7 +29,7 @@ export const settlementsCommand = new SlashCommandBuilder()
       .setRequired(false)
   );
 
-export async function executeSettlements(interaction: CommandInteraction) {
+export async function executeSettlements(interaction: ChatInputCommandInteraction) {
   await interaction.deferReply({ ephemeral: true });
 
   const userId = interaction.user.id;
