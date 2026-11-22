@@ -13,10 +13,8 @@ services:
       start_period: 20s
 
   kalshi-sentinel:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: kalshi-sentinel:local
+    image: ghcr.io/tw1zt3d2four7/kalshi-sentinel:latest
+    pull_policy: always
     container_name: kalshi-sentinel
     restart: unless-stopped
     init: true
