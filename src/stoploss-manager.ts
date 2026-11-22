@@ -40,7 +40,7 @@ export class StopLossManager {
     this.activeStopLosses.get(id)?.close();
 
     const wsUrl = KALSHI_BASE_URL.includes('demo')
-      ? 'wss://demo-api.kalshi.co/trade-api/ws/v2'
+      ? 'wss://external-api-ws.demo.kalshi.co/trade-api/ws/v2'
       : 'wss://external-api-ws.kalshi.com/trade-api/ws/v2';
 
     const timestamp = Date.now().toString();
