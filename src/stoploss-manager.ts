@@ -61,6 +61,7 @@ export class StopLossManager {
       },
     });
     this.activeStopLosses.set(id, ws);
+    ws.on('error', error => console.error(`Kalshi stop-loss socket error for ${id}:`, error));
 
     let hasExecuted = false;
     await new Promise<void>((resolve, reject) => {
