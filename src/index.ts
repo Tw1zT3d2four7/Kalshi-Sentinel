@@ -64,6 +64,56 @@ const client = new Client({
   intents: [GatewayIntentBits.Guilds],
 });
 
+
+let botInitialized = false;
+
+client.on(Events.InteractionCreate, async (interaction) => {
+  console.log(`📨 Discord interaction received: ${interaction.isChatInputCommand() ? '/' + interaction.commandName : interaction.isModalSubmit() ? 'modal:' + interaction.customId : 'other'}`);
+
+  if (interaction.isChatInputCommand()) {
+    const { commandName } = interaction;
+    if (!botInitialized) {
+      await interaction.reply({ content: '⏳ The bot is still initializing. Please try again shortly.', ephemeral: true }).catch(console.error);
+      return;
+    }
+    try {
+      switch (commandName) {
+        case 'markets': await executeMarkets(interaction); break;
+        case 'link': await executeLink(interaction); break;
+        case 'bet': await executeBet(interaction); break;
+        case 'portfolio': await executePortfolio(interaction); break;
+        case 'balance': await executeBalance(interaction); break;
+        case 'settlements': await executeSettlements(interaction); break;
+        case 'positions': await executePositions(interaction); break;
+        case 'alert': await executeAlert(interaction); break;
+        case 'stoploss': await executeStopLoss(interaction); break;
+        default: await interaction.reply({ content: '❌ Unknown command.', ephemeral: true });
+      }
+    } catch (error) {
+      console.error(`❌ Error executing /${commandName}:`, error);
+      const message = '❌ The command failed unexpectedly. Check the bot logs for details.';
+      try {
+        if (interaction.deferred || interaction.replied) await interaction.followUp({ content: message, ephemeral: true });
+        else await interaction.reply({ content: message, ephemeral: true });
+      } catch (replyError) {
+        console.error('❌ Could not send command error response:', replyError);
+      }
+    }
+    return;
+  }
+
+  if (interaction.isModalSubmit() && interaction.customId === 'kalshi_link_modal') {
+    try {
+      await handleLinkModal(interaction);
+    } catch (error) {
+      console.error('❌ Error handling Kalshi link modal:', error);
+      if (!interaction.replied && !interaction.deferred) {
+        await interaction.reply({ content: '❌ Account linking failed unexpectedly.', ephemeral: true }).catch(console.error);
+      }
+    }
+  }
+});
+
 client.once(Events.ClientReady, async (discord) => {
   try {
     console.log(`🤖 Kalshi Discord Bot Ready! Logged in as ${discord.user.tag}`);
@@ -103,60 +153,6 @@ client.once(Events.ClientReady, async (discord) => {
 
     console.log('✅ Registered commands: /markets, /link, /bet, /portfolio, /balance, /settlements, /positions, /alert, /stoploss');
 
-    // Handle interactions (slash commands)
-    client.on(Events.InteractionCreate, async (interaction) => {
-      if (interaction.isCommand()) {
-        const { commandName } = interaction;
-
-        try {
-          switch (commandName) {
-            case 'markets':
-              await executeMarkets(interaction as ChatInputCommandInteraction);
-              break;
-            case 'link':
-              await executeLink(interaction as ChatInputCommandInteraction);
-              break;
-            case 'bet':
-              await executeBet(interaction as ChatInputCommandInteraction);
-              break;
-            case 'portfolio':
-              await executePortfolio(interaction as ChatInputCommandInteraction);
-              break;
-            case 'balance':
-              await executeBalance(interaction as ChatInputCommandInteraction);
-              break;
-            case 'settlements':
-              await executeSettlements(interaction as ChatInputCommandInteraction);
-              break;
-            case 'positions':
-              await executePositions(interaction as ChatInputCommandInteraction);
-              break;
-            case 'alert':
-              await executeAlert(interaction as ChatInputCommandInteraction);
-              break;
-            case 'stoploss':
-              await executeStopLoss(interaction as ChatInputCommandInteraction);
-              break;
-            default:
-              await interaction.reply({
-                content: '❌ Unknown command.',
-                ephemeral: true,
-              });
-          }
-        } catch (error) {
-          console.error(`Error executing /${commandName}:`, error);
-          // Don't try to reply here - let the command handler deal with it
-        }
-      }
-      
-      // Handle modal submissions
-      if (interaction.isModalSubmit()) {
-        if (interaction.customId === 'kalshi_link_modal') {
-          await handleLinkModal(interaction);
-        }
-      }
-    });
-
     console.log('✅ Kalshi bot initialized!');
     console.log('📋 Ready for prediction trading...');
 
@@ -172,6 +168,7 @@ client.once(Events.ClientReady, async (discord) => {
       }
     });
 
+    botInitialized = true;
     console.log('🚀 Kalshi bot started successfully!');
     console.log('⏳ Ready for prediction trading...');
 
