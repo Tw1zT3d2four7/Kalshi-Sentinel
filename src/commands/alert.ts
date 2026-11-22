@@ -5,7 +5,7 @@
 
 import {
   SlashCommandBuilder,
-  CommandInteraction,
+  ChatInputCommandInteraction,
   EmbedBuilder,
 } from 'discord.js';
 import * as dotenv from 'dotenv';
@@ -73,7 +73,7 @@ export const alertCommand = new SlashCommandBuilder()
       )
   );
 
-export async function executeAlert(interaction: CommandInteraction) {
+export async function executeAlert(interaction: ChatInputCommandInteraction) {
   const subcommand = (interaction.options as any).getSubcommand();
   const userId = interaction.user.id;
 
@@ -114,7 +114,7 @@ export async function executeAlert(interaction: CommandInteraction) {
 }
 
 async function handleSetAlert(
-  interaction: CommandInteraction,
+  interaction: ChatInputCommandInteraction,
   userId: string
 ) {
   const ticker = ((interaction.options as any).getString('ticker') || '').toUpperCase();
@@ -190,7 +190,7 @@ async function handleSetAlert(
 }
 
 async function handleListAlerts(
-  interaction: CommandInteraction,
+  interaction: ChatInputCommandInteraction,
   userId: string
 ) {
   const activeAlerts = alertManager.getActiveAlerts(userId);
@@ -225,7 +225,7 @@ async function handleListAlerts(
 }
 
 async function handleStopAlert(
-  interaction: CommandInteraction,
+  interaction: ChatInputCommandInteraction,
   userId: string
 ) {
   const ticker = ((interaction.options as any).getString('ticker') || '').toUpperCase();
