@@ -1,0 +1,34 @@
+services:
+  mongodb:
+    image: mongo:8.0
+    container_name: kalshi-sentinel-mongodb
+    restart: unless-stopped
+    volumes:
+      - kalshi_sentinel_mongodb_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  kalshi-sentinel:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: kalshi-sentinel:local
+    container_name: kalshi-sentinel
+    restart: unless-stopped
+    init: true
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      MONGODB_URI: mongodb://mongodb:27017/kalshi_sentinel
+      KALSHI_BASE_URL: ${KALSHI_BASE_URL:-https://demo-api.kalshi.co}
+    stop_grace_period: 30s
+
+volumes:
+  kalshi_sentinel_mongodb_data:
